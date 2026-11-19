@@ -19,7 +19,7 @@ Figures of an ANNA storm hindcast (`python -m anna_inference` with
   also saved as `<prefix>_wind_single_<HH>Z.png`
 - with `--side-by-side`: `<prefix>_wind_danra_anna.gif`, DANRA (left) next
   to ANNA (right) on the same domain (no title, for a slide next to CLARA's
-  DANRA/member animation), holding `--valid-time`, which is also saved as
+  DANRA/member animation), steady frames; `--valid-time` is also saved as
   `<prefix>_wind_danra_anna_<HH>Z.png`
 
 DANRA is taken from the workdir (`inputs/interior_single_levels.zarr`, which
@@ -1049,7 +1049,7 @@ def plot_side_by_side_animation(
     ds_danra: xr.Dataset,
     out_dir: Path,
     prefix: str,
-    hold_time: np.datetime64,
+    png_time: np.datetime64,
 ) -> None:
     """
     Animate DANRA (left) next to ANNA (right), for a slide (no title).
@@ -1058,8 +1058,7 @@ def plot_side_by_side_animation(
     domain, with a boxed label in their top-left corner, one time stamp
     centred above them and one slim colour bar below. `PAIR_SIZE_PX` on
     white, no outer margins. Every ANNA valid time is a frame of
-    `SINGLE_FRAME_MS`, `hold_time` is held for `SINGLE_HOLD_MS` and also
-    saved as a PNG.
+    `SINGLE_FRAME_MS` (steady, no hold); `png_time` is also saved as a PNG.
 
     Parameters
     ----------
@@ -1072,8 +1071,8 @@ def plot_side_by_side_animation(
         `<prefix>_wind_danra_anna_<HH>Z.png`.
     prefix : str
         The file name prefix.
-    hold_time : np.datetime64
-        The valid time to hold (and save as a PNG).
+    png_time : np.datetime64
+        The valid time to also save as a PNG.
     """
     ds_anna_trim = trim_domain(ds_anna).load()
     ds_danra_trim = trim_domain(ds_danra.sel(time=ds_anna.time)).load()
@@ -1136,15 +1135,14 @@ def plot_side_by_side_animation(
         cb.ax.tick_params(colors=INK, labelsize=PAIR_FONT)
         cb.outline.set_edgecolor(GRID)
         image = render_figure(fig)
-        hold = valid_time == np.datetime64(hold_time, "ns")
-        if hold:
+        if valid_time == np.datetime64(png_time, "ns"):
             fp_png = out_dir / f"{prefix}_wind_danra_anna_{t:%H}Z.png"
             image.save(fp_png)
             print(f"wrote {fp_png}")
         frames.append(
             image.quantize(palette=palette, dither=Image.Dither.NONE)
         )
-        durations.append(SINGLE_HOLD_MS if hold else SINGLE_FRAME_MS)
+    durations = [SINGLE_FRAME_MS] * len(frames)
     save_gif(frames, durations, out_dir / f"{prefix}_wind_danra_anna.gif")
 
 
@@ -1205,8 +1203,8 @@ def main() -> None:
     parser.add_argument(
         "--side-by-side",
         action="store_true",
-        help="also animate DANRA next to ANNA, for a slide, holding "
-        "--valid-time",
+        help="also animate DANRA next to ANNA, for a slide (--valid-time "
+        "also as a PNG)",
     )
     args = parser.parse_args()
 
