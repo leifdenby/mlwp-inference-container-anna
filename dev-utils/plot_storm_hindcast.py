@@ -14,6 +14,9 @@ Figures of an ANNA storm hindcast (`python -m anna_inference` with
   other models (e.g. the CLARA hindcast of the same case) can be overlaid
 - with `--frames`: `frames/<prefix>_wind_<valid time>.png`, the 2x2 maps of
   every valid time, and `<prefix>_wind.gif` animating them
+- with `--single`: `<prefix>_wind_single.gif`, ANNA on its own over its
+  whole domain (no title, for a slide), holding `--valid-time`, which is
+  also saved as `<prefix>_wind_single_<HH>Z.png`
 
 DANRA is taken from the workdir (`inputs/interior_single_levels.zarr`, which
 covers the initial states and all valid times). Winds are relative to the
@@ -65,6 +68,18 @@ WIND_YLIM = (0.0, 50.0)
 FIGSIZE = (16, 9)
 DPI = 150
 GIF_FRAME_MS = 700
+# the single-panel animation (--single): ANNA's domain without the outer
+# grid points (25 km), for a slide box of ~3.6 x 2.6 in
+WHITE = "#ffffff"
+SINGLE_TRIM_POINTS = 10
+SINGLE_SIZE_PX = (1600, 1150)
+SINGLE_FRAME_MS = 800
+SINGLE_HOLD_MS = 2500
+# GIF palette: colours of the wind colour map evenly over 0-40 m/s (an
+# adaptive palette spends them on the common light colours and loses the
+# wind maxima), and greys from white to black for lines and text
+SINGLE_GIF_CMAP_COLORS = 160
+SINGLE_GIF_GREYS = 32
 # hourly ERA5 (the 6-hourly WeatherBench2 store of the boundary is derived
 # from it); zarr v2, as the environment has zarr < 3
 ARCO_ERA5 = (
@@ -728,6 +743,166 @@ def plot_frames(
     print(f"wrote {fp_gif}")
 
 
+def create_gif_palette() -> Image.Image:
+    """
+    Create the GIF palette of the single-panel animation.
+
+    Returns
+    -------
+    Image.Image
+        A palette image: `SINGLE_GIF_CMAP_COLORS` colours of the wind colour
+        map, evenly over its range, and `SINGLE_GIF_GREYS` greys from white
+        to black.
+    """
+    cmap = plt.get_cmap(WIND_STYLE["cmap"])
+    rgb = [
+        tuple(int(round(255 * c)) for c in cmap(f)[:3])
+        for f in np.linspace(0, 1, SINGLE_GIF_CMAP_COLORS)
+    ]
+    rgb += [
+        (int(g),) * 3 for g in np.linspace(255, 0, SINGLE_GIF_GREYS).round()
+    ]
+    flat = [c for colour in rgb for c in colour]
+    flat += [0] * (768 - len(flat))
+    palette = Image.new("P", (1, 1))
+    palette.putpalette(flat)
+    return palette
+
+
+def plot_single_animation(
+    ds_anna: xr.Dataset,
+    out_dir: Path,
+    prefix: str,
+    hold_time: np.datetime64,
+) -> None:
+    """
+    Animate ANNA on its own over its whole domain, for a slide (no title).
+
+    One map of the 10 m wind speed with MSLP contours (styled as the
+    comparison maps) on the DANRA grid without its outer
+    `SINGLE_TRIM_POINTS` points, a large time stamp, and a slim colour bar.
+    1600 x 1150 px on white, fonts at least ~4% of the height. Every valid
+    time is a frame of `SINGLE_FRAME_MS`, `hold_time` is held for
+    `SINGLE_HOLD_MS` and also saved as a PNG.
+
+    Parameters
+    ----------
+    ds_anna : xr.Dataset
+        ANNA single levels (`outputs/single_levels.zarr`).
+    out_dir : Path
+        Directory for `<prefix>_wind_single.gif` and
+        `<prefix>_wind_single_<HH>Z.png`.
+    prefix : str
+        The file name prefix.
+    hold_time : np.datetime64
+        The valid time to hold (and save as a PNG).
+    """
+    n = SINGLE_TRIM_POINTS
+    ds = ds_anna.isel(y=slice(n, -n), x=slice(n, -n)).load()
+    init_time = get_init_time(ds_anna)
+    x, y = ds.x.values, ds.y.values
+    dx, dy = x[1] - x[0], y[1] - y[0]
+    extent = [x[0] - dx / 2, x[-1] + dx / 2, y[0] - dy / 2, y[-1] + dy / 2]
+    width_px, height_px = SINGLE_SIZE_PX
+    palette = create_gif_palette()
+    frames, durations = [], []
+    for valid_time in ds.time.values:
+        ds_t = ds.sel(time=valid_time)
+        da_wind = calculate_wind_speed(ds_t)
+        da_mslp = ds_t.pres_seasurface / 100
+        fig = plt.figure(
+            figsize=(width_px / 100, height_px / 100),
+            dpi=100,
+            facecolor=WHITE,
+        )
+        # the map fills the height above the colour bar; it is narrower than
+        # the figure (DANRA's aspect is 1.34), the sides are white
+        ax = fig.add_axes(
+            [0.0, 0.2, 1.0, 0.8], projection=DANRA_CRS, facecolor=WHITE
+        )
+        ax.set_extent(extent, crs=DANRA_CRS)
+        ax.set_anchor("N")
+        ax.add_feature(
+            cfeature.COASTLINE.with_scale("50m"), edgecolor=INK, linewidth=1.0
+        )
+        for spine in ax.spines.values():
+            spine.set_edgecolor(GRID)
+        mesh = ax.pcolormesh(
+            x,
+            y,
+            da_wind.values,
+            transform=DANRA_CRS,
+            shading="auto",
+            rasterized=True,
+            **WIND_STYLE,
+        )
+        cs = ax.contour(
+            x,
+            y,
+            da_mslp.values,
+            levels=MSLP_LEVELS,
+            colors=INK,
+            linewidths=1.2,
+            transform=DANRA_CRS,
+        )
+        ax.clabel(cs, fmt="%d", fontsize=18)
+        i_min = np.unravel_index(np.nanargmin(da_mslp.values), da_mslp.shape)
+        ax.plot(
+            x[i_min[1]],
+            y[i_min[0]],
+            marker="x",
+            color=INK,
+            markersize=18,
+            markeredgewidth=3.5,
+            transform=DANRA_CRS,
+        )
+        t = pd.Timestamp(valid_time)
+        lead_h = int((valid_time - init_time) / np.timedelta64(1, "h"))
+        ax.text(
+            0.015,
+            0.975,
+            f"{t.day} {t:%b %Y %H} UTC (+{lead_h} h)",
+            transform=ax.transAxes,
+            fontsize=36,
+            color=INK,
+            ha="left",
+            va="top",
+            bbox=dict(facecolor=WHITE, edgecolor="none", alpha=0.8, pad=6),
+        )
+        ax.apply_aspect()
+        pos = ax.get_position()
+        cax = fig.add_axes([pos.x0 + 0.1, 0.12, pos.width - 0.2, 0.022])
+        cb = fig.colorbar(mesh, cax=cax, orientation="horizontal")
+        cb.set_label("10 m wind speed (m/s)", color=INK, fontsize=34)
+        cb.ax.tick_params(colors=INK, labelsize=34)
+        cb.outline.set_edgecolor(GRID)
+        fig.canvas.draw()
+        image = Image.frombuffer(
+            "RGBA", fig.canvas.get_width_height(), fig.canvas.buffer_rgba()
+        ).convert("RGB")
+        hold = valid_time == np.datetime64(hold_time, "ns")
+        if hold:
+            fp_png = out_dir / f"{prefix}_wind_single_{t:%H}Z.png"
+            image.save(fp_png)
+            print(f"wrote {fp_png}")
+        plt.close(fig)
+        # no dithering: its noise makes the GIF much larger
+        frames.append(
+            image.quantize(palette=palette, dither=Image.Dither.NONE)
+        )
+        durations.append(SINGLE_HOLD_MS if hold else SINGLE_FRAME_MS)
+    fp_gif = out_dir / f"{prefix}_wind_single.gif"
+    frames[0].save(
+        fp_gif,
+        save_all=True,
+        append_images=frames[1:],
+        duration=durations,
+        loop=0,
+        optimize=True,
+    )
+    print(f"wrote {fp_gif} ({fp_gif.stat().st_size / 1e6:.1f} MB)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -776,6 +951,12 @@ def main() -> None:
         action="store_true",
         help="also plot the 2x2 maps of every valid time, and a GIF",
     )
+    parser.add_argument(
+        "--single",
+        action="store_true",
+        help="also animate ANNA on its own over its domain, for a slide, "
+        "holding --valid-time",
+    )
     args = parser.parse_args()
 
     workdir = args.workdir.expanduser()
@@ -813,6 +994,8 @@ def main() -> None:
     )
     if args.frames:
         plot_frames(ds_anna, ds_danra, out_dir, prefix, args.case_name)
+    if args.single:
+        plot_single_animation(ds_anna, out_dir, prefix, valid_time)
 
 
 if __name__ == "__main__":
