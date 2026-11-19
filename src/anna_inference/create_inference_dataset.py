@@ -1,6 +1,8 @@
 """
 Create the inference datastores and neural-lam config for running ANNA
-from regridded DINI (interior) and DINI or IFS (boundary) data.
+from regridded DINI (interior) and DINI or IFS (boundary) data, or, for
+hindcasts, from DANRA (interior, `danra_interior.py`) and ERA5 (boundary,
+`era5_boundary.py`, in the IFS contract layout).
 
 Inputs:
 - the inference artifact (`anna_inference.artifact`), which describes the

@@ -47,6 +47,39 @@ def test_config_from_env(artifact, tmp_path):
     )
     assert sources["forecast_duration"] == "env"
     assert sources["boundary_source"] == "default"
+    # operational by default
+    assert (args.initial_state_source, args.boundary_source) == (
+        "dini",
+        "dini",
+    )
+
+
+def test_hindcast_config_from_env(artifact):
+    environ = {
+        "ANNA_ANALYSIS_TIME": "1999-12-02T21:00Z",
+        "ANNA_FORECAST_DURATION": "PT27H",
+        "ANNA_INITIAL_STATE_SOURCE": "danra",
+        "ANNA_BOUNDARY_SOURCE": "era5",
+        "ANNA_ARTIFACT_PATH": str(artifact),
+    }
+    _, args, sources = run.parse_config([], environ)
+    assert args.analysis_time == datetime.datetime(1999, 12, 2, 21)
+    assert (args.initial_state_source, args.boundary_source) == (
+        "danra",
+        "era5",
+    )
+    assert sources["initial_state_source"] == "env"
+
+
+def test_danra_needs_another_boundary_than_dini(artifact):
+    argv = [
+        "--analysis-time", "1999-12-02T21:00",
+        "--initial-state-source", "danra",
+        "--artifact-path", str(artifact),
+    ]  # fmt: skip
+    with pytest.raises(SystemExit) as ex:
+        run.parse_config(argv, {})
+    assert ex.value.code == 2
 
 
 @pytest.mark.parametrize("duration", ["PT6H", "PT13H", "P1M", "18h"])

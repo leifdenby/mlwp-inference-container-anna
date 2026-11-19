@@ -7,9 +7,15 @@ inference artifact (see artifact/README.md) is in ./inference_artifact. It
 can also be run outside the container in the uv environment of this
 repository, with `--artifact-path artifact/build/<artifact-name>`.
 
+For hindcasts of past cases (no DINI forecast), the initial states can come
+from DANRA (`--initial-state-source danra`) and the boundary from ERA5
+(`--boundary-source era5`), the data ANNA was trained with.
+
 Steps (see HISTORY.md), each run as a subprocess:
   1. regrid DINI to the DANRA grid (interior) and, for the DINI boundary,
-     to the 0.25 deg ERA5 boundary box     (anna_inference.regrid_dini)
+     to the 0.25 deg ERA5 boundary box     (anna_inference.regrid_dini);
+     for hindcasts, copy DANRA (anna_inference.danra_interior) and lay out
+     ERA5 as a boundary forecast           (anna_inference.era5_boundary)
   2. create the inference datastores and neural-lam config
                                    (anna_inference.create_inference_dataset)
   3. build the model's graph               (neural_lam.build_rectangular_graph)
@@ -41,7 +47,8 @@ from anna_inference import envargs
 
 ENV_PREFIX = "ANNA"
 DEFAULT_DINI_ROOT = "s3://harmonie-zarr/dini/control/{analysis}/"
-BOUNDARY_SOURCES = ["dini", "ifs"]
+INITIAL_STATE_SOURCES = ["dini", "danra"]
+BOUNDARY_SOURCES = ["dini", "ifs", "era5"]
 AWS_ENV_CREDENTIALS = [
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -98,7 +105,8 @@ def build_parser():
         required=True,
         type=parse_analysis_time,
         help="DINI analysis time, ISO8601, e.g. 2026-10-01T00:00Z (UTC if "
-        "no timezone); 00/06/12/18 UTC with the DINI boundary",
+        "no timezone); 00/06/12/18 UTC with the DINI boundary. The initial "
+        "states are this time and +3h",
     )
     parser.add_argument(
         "--forecast-duration",
@@ -109,10 +117,18 @@ def build_parser():
         "(PT30H for a 36h DINI run) (default: %(default)s)",
     )
     parser.add_argument(
+        "--initial-state-source",
+        choices=INITIAL_STATE_SOURCES,
+        default="dini",
+        help="dini: regridded DINI; danra: DANRA v0.5.0 itself, for "
+        "hindcasts (default: %(default)s)",
+    )
+    parser.add_argument(
         "--boundary-source",
         choices=BOUNDARY_SOURCES,
         default="dini",
-        help="(default: %(default)s)",
+        help="dini needs --initial-state-source dini; era5: WeatherBench2 "
+        "ERA5 (1959-2021), for hindcasts (default: %(default)s)",
     )
     parser.add_argument(
         "--dini-root",
@@ -188,6 +204,11 @@ def parse_config(argv=None, environ=None):
     args, sources = envargs.parse_args(parser, ENV_PREFIX, argv, environ)
     if args.boundary_source == "ifs" and not args.ifs_boundary_path:
         parser.error("--boundary-source ifs needs --ifs-boundary-path")
+    if args.boundary_source == "dini" and args.initial_state_source != "dini":
+        parser.error(
+            "--boundary-source dini needs --initial-state-source dini (the "
+            "boundary comes from the same DINI forecast)"
+        )
     if not args.output_s3_prefix and (
         args.output_s3_endpoint_url or args.output_aws_profile
     ):
@@ -276,7 +297,7 @@ class Forecast:
     def mark_completed(self, path):
         (path / ".completed").write_text(
             f"{self.analysis_iso} {self.duration_iso} "
-            f"{self.args.boundary_source}\n"
+            f"{self.args.initial_state_source} {self.args.boundary_source}\n"
         )
 
     def checkpoint(self):
@@ -293,23 +314,51 @@ class Forecast:
         if self.completed(inputs, "the regridding"):
             return
         (inputs / ".completed").unlink(missing_ok=True)
-        cmd = [
-            sys.executable,
-            "-m",
-            "anna_inference.regrid_dini",
-            "regrid",
-            "--dini-root",
-            self.args.dini_root,
-            "--danra-grid",
-            self.danra_grid,
+        times = [
             "--forecast-duration",
             self.duration_iso,
             "--output",
             inputs,
         ]
-        if self.args.boundary_source == "ifs":
-            cmd.append("--no-boundary")
-        self.run_step("1. regrid DINI", cmd, env=self.step_env("input"))
+        if self.args.initial_state_source == "dini":
+            cmd = [
+                sys.executable,
+                "-m",
+                "anna_inference.regrid_dini",
+                "regrid",
+                "--dini-root",
+                self.args.dini_root,
+                "--danra-grid",
+                self.danra_grid,
+                *times,
+            ]
+            if self.args.boundary_source != "dini":
+                cmd.append("--no-boundary")
+            self.run_step("1. regrid DINI", cmd, env=self.step_env("input"))
+        else:
+            self.run_step(
+                "1. DANRA interior",
+                [
+                    sys.executable,
+                    "-m",
+                    "anna_inference.danra_interior",
+                    "--analysis-time",
+                    self.analysis_iso,
+                    *times,
+                ],
+            )
+        if self.args.boundary_source == "era5":
+            self.run_step(
+                "1. ERA5 boundary",
+                [
+                    sys.executable,
+                    "-m",
+                    "anna_inference.era5_boundary",
+                    "--analysis-time",
+                    self.analysis_iso,
+                    *times,
+                ],
+            )
         self.mark_completed(inputs)
 
     def create_datastores(self):
@@ -317,10 +366,11 @@ class Forecast:
         if self.completed(datastores, "the inference datastores"):
             return
         (datastores / ".completed").unlink(missing_ok=True)
-        if self.args.boundary_source == "dini":
-            boundary = self.workdir / "inputs" / "boundary.zarr"
-        else:
+        if self.args.boundary_source == "ifs":
             boundary = self.args.ifs_boundary_path
+        else:
+            # written by step 1 (DINI regridded, or ERA5)
+            boundary = self.workdir / "inputs" / "boundary.zarr"
         self.run_step(
             "2. inference datastores",
             [
@@ -442,6 +492,10 @@ class Forecast:
                 self.analysis_iso,
                 "--output-dir",
                 self.workdir / "outputs",
+                "--initial-state-source",
+                self.args.initial_state_source,
+                "--boundary-source",
+                self.args.boundary_source,
             ],
         )
 

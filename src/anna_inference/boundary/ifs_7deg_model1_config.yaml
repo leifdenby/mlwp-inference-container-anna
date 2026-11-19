@@ -25,7 +25,8 @@
 # - statics (`land_sea_mask`, `geopotential_at_surface`) are taken from IFS
 #   itself rather than from ERA5, so the operational setup has one source
 # - no `compute_statistics` (stats come from ERA5), no `coord_ranges` (one
-#   store per cycle) and splits wide enough to cover any analysis time, so the
+#   store per cycle) and splits wide enough to cover any analysis time (from
+#   1950, for ERA5 hindcasts too), so the
 #   config can be used as-is with only the input `path`s set at run time
 #
 # =============================================================================
@@ -118,13 +119,13 @@ output:
     dim: time
     splits:
       train:
-        start: 2000-01-01T00:00
+        start: 1950-01-01T00:00
         end: 2100-01-01T00:00
       val:
-        start: 2000-01-01T00:00
+        start: 1950-01-01T00:00
         end: 2100-01-01T00:00
       test:
-        start: 2000-01-01T00:00
+        start: 1950-01-01T00:00
         end: 2100-01-01T00:00
   domain_cropping:
     margin_width_degrees: 7.19

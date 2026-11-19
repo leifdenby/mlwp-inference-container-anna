@@ -6,7 +6,8 @@ Which configs ANNA uses.
   interior (DANRA) and boundary (ERA5) datastore configs. The artifact has
   their statistics and grids.
 - **Operational boundaries** (this package, `anna_inference/boundary/`): the
-  boundary datastore configs for running from DINI or IFS forecasts. They are
+  boundary datastore configs for running from DINI or IFS forecasts (or from
+  ERA5 in the IFS layout, for hindcasts). They are
   not part of the model. The neural-lam config for a forecast is derived from
   the training one (`inference_neural_lam_config`): the same model and
   settings, with the operational boundary normalised with the ERA5 training
@@ -23,6 +24,9 @@ import yaml
 BOUNDARY_SOURCES = {
     "dini": "dini_7deg_model1_config.yaml",
     "ifs": "ifs_7deg_model1_config.yaml",
+    # hindcasts: ERA5 laid out as a forecast in the IFS contract
+    # (anna_inference.era5_boundary)
+    "era5": "ifs_7deg_model1_config.yaml",
 }
 
 

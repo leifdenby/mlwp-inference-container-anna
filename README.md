@@ -218,7 +218,8 @@ over its variable, which wins over the default:
 |---|---|---|---|
 | `--analysis-time` | `ANNA_ANALYSIS_TIME` | (required) | DINI analysis time, ISO8601, e.g. `2026-10-01T00:00Z` (UTC if no timezone); 00/06/12/18 UTC with the DINI boundary |
 | `--forecast-duration` | `ANNA_FORECAST_DURATION` | `PT18H` | multiple of 3 h, between 12 h (neural-lam needs that to load the model) and DINI forecast length − 6 h (30 h for a 36 h DINI run) |
-| `--boundary-source` | `ANNA_BOUNDARY_SOURCE` | `dini` | `dini` or `ifs` |
+| `--initial-state-source` | `ANNA_INITIAL_STATE_SOURCE` | `dini` | `dini` (regridded DINI) or `danra` (DANRA itself, for hindcasts, see [Hindcasts](#hindcasts-danra-initial-states-and-era5-boundary)) |
+| `--boundary-source` | `ANNA_BOUNDARY_SOURCE` | `dini` | `dini` (needs `--initial-state-source dini`), `ifs` or `era5` (for hindcasts) |
 | `--dini-root` | `ANNA_DINI_ROOT` | `s3://harmonie-zarr/dini/control/{analysis}/` | DINI forecast zarrs |
 | `--ifs-boundary-path` | `ANNA_IFS_BOUNDARY_PATH` | | IFS forecast zarr, required for `--boundary-source ifs` |
 | `--workdir` | `ANNA_WORKDIR` | `inference_workdir` | working directory, with the outputs in `outputs/` |
@@ -325,12 +326,57 @@ docker run --rm --gpus all --shm-size=32g \
 The image gives the same forecast as the uv environment: identical outputs
 for DINI 2026-10-01T00Z PT12H, with the image's NVIDIA torch 2.10.
 
+### Hindcasts: DANRA initial states and ERA5 boundary
+
+Past cases have no DINI forecast. For those, the inputs can come from the
+data ANNA was trained with, read from the same places as in the training
+configs (the artifact's `configs/danra_model1_config.yaml` and
+`era_7deg_model1_config.yaml`):
+
+- **`--initial-state-source danra`:** step 1 copies DANRA v0.5.0
+  (`https://object-store.os-api.cci1.ecmwf.int/danra/v0.5.0/`, from
+  1990-09) for the analysis time, +3 h and the valid times after it, with no
+  regridding or conversion
+  ([danra_interior.py](src/anna_inference/danra_interior.py)). The DANRA
+  zarrs are chunked by 32 days, so a short forecast still reads about 13 GB.
+- **`--boundary-source era5`:** the WeatherBench2 ERA5 analyses
+  (`gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr`, read
+  anonymously) are laid out as a forecast in the IFS contract, from the 00/12
+  UTC cycle at or before the analysis time, each lead time the analysis at
+  its valid time ([era5_boundary.py](src/anna_inference/era5_boundary.py)).
+  The model therefore sees ERA5 at 00/06/12/18 UTC as in training, with the
+  ERA5 statics. Any 3-hourly analysis time works.
+
+The outputs record the sources in their `initial_state_source` and
+`boundary_source` attributes, and a hindcast says so in its `comment`.
+
+```bash
+# the 3 December 1999 storm: initial states 1999-12-02T21Z and 03T00Z,
+# predictions 03T03Z .. 04T00Z
+ANNA_WORKDIR=~/anna-hindcasts/1999-12-03_storm/init-1999-12-03T00 \
+    ANNA_INITIAL_STATE_SOURCE=danra ANNA_BOUNDARY_SOURCE=era5 \
+    CONTAINER_APP=docker scripts/run_inference_container.sh \
+    1999-12-02T21:00Z PT27H
+```
+
+[dev-utils/plot_storm_hindcast.py](dev-utils/plot_storm_hindcast.py) plots a
+hindcast against DANRA (wind and MSLP maps, time series over Denmark, and
+optionally animation frames):
+
+```bash
+uv run python dev-utils/plot_storm_hindcast.py \
+    --workdir ~/anna-hindcasts/1999-12-03_storm/init-1999-12-03T00 \
+    --valid-time 1999-12-03T18:00 --observed-min-mslp 952 \
+    --observed-max-wind 41.2 --frames
+```
+
 ### Outputs and conventions
 
 `<workdir>/outputs/single_levels.zarr` (pres_seasurface, t2m, u10m,
 v10m, pres0m, lwavr0m, swavr0m) and `pressure_levels.zarr` (z, t, r, u, v, tw
 at 100–1000 hPa) are on the DANRA grid at valid times T+6 h …
-T+`FORECAST_DURATION` in 3 h steps. The initial states are DINI at T+0 and
+T+`FORECAST_DURATION` in 3 h steps. The initial states (DINI, or DANRA for a
+hindcast) are at T+0 and
 T+3 h. The conventions are DANRA's:
 
 - **winds are relative to the DANRA (Lambert) grid**, not east/north

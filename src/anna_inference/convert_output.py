@@ -95,8 +95,35 @@ def projection_cf_attrs(interior_config):
     }
 
 
-def convert(ds_pred, ds_grid, analysis_time, projection_attrs):
-    """Split the predicted state features into single/pressure level datasets."""
+def source_attrs(initial_state_source="dini", boundary_source="dini"):
+    """
+    Attributes recording where the inputs came from, with a comment for
+    hindcasts (DANRA initial states and/or an ERA5 boundary).
+    """
+    attrs = dict(
+        initial_state_source=initial_state_source,
+        boundary_source=boundary_source,
+    )
+    if initial_state_source == "danra" or boundary_source == "era5":
+        initial = {"danra": "DANRA", "dini": "DINI"}[initial_state_source]
+        boundary = boundary_source.upper()
+        attrs["comment"] = (
+            f"{initial}/{boundary} hindcast: initial states from "
+            f"{initial}, boundary from {boundary}"
+            + (
+                " (the inputs ANNA was trained with)"
+                if (initial, boundary) == ("DANRA", "ERA5")
+                else ""
+            )
+        )
+    return attrs
+
+
+def convert(ds_pred, ds_grid, analysis_time, projection_attrs, attrs=None):
+    """
+    Split the predicted state features into single/pressure level datasets,
+    with the global attributes `attrs` added (e.g. `source_attrs`).
+    """
     if ds_pred.start_time.size != 1:
         raise ValueError(
             f"expected a single forecast, got {ds_pred.start_time.size} start times"
@@ -122,6 +149,7 @@ def convert(ds_pred, ds_grid, analysis_time, projection_attrs):
         source="ANNA forecast (DANRA ML LAM model, arXiv:2504.09340)",
         analysis_time=str(np.datetime64(analysis_time, "s")),
         start_time=str(ds_pred.start_time.values[0]),
+        **(attrs or {}),
     )
 
     def _var(feature):
@@ -192,6 +220,12 @@ def main():
     )
     parser.add_argument("--analysis-time", required=True, type=np.datetime64)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "--initial-state-source", choices=["dini", "danra"], default="dini"
+    )
+    parser.add_argument(
+        "--boundary-source", choices=["dini", "ifs", "era5"], default="dini"
+    )
     args = parser.parse_args()
 
     ds_pred = xr.open_zarr(args.prediction)
@@ -201,6 +235,7 @@ def main():
         ds_grid,
         args.analysis_time,
         projection_cf_attrs(args.interior_config),
+        source_attrs(args.initial_state_source, args.boundary_source),
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for name, ds in [("single_levels", ds_sl), ("pressure_levels", ds_pl)]:

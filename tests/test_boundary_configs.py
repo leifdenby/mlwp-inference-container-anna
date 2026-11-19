@@ -228,12 +228,15 @@ def test_boundary_config_loads(name):
 
 
 def test_operational_boundary_configs_are_packaged():
-    assert set(BOUNDARY_SOURCES) == {"dini", "ifs"}
-    for name in BOUNDARY_SOURCES:
+    assert set(BOUNDARY_SOURCES) == {"dini", "ifs", "era5"}
+    for name in ["dini", "ifs"]:
         assert boundary_config_path(name).name == BOUNDARY_CONFIGS[name]
         assert boundary_config_path(name).exists()
+    # hindcasts: ERA5 laid out in the IFS contract (era5_boundary.py), not
+    # the training boundary config
+    assert boundary_config_path("era5").name == BOUNDARY_CONFIGS["ifs"]
     with pytest.raises(KeyError):
-        boundary_config_path("era5")  # the training boundary isn't one
+        boundary_config_path("cerra")
 
 
 def test_interior_config_loads():
@@ -265,7 +268,7 @@ def test_training_configs_resolve():
     )
 
 
-@pytest.mark.parametrize("name", list(BOUNDARY_SOURCES))
+@pytest.mark.parametrize("name", ["dini", "ifs"])
 def test_inference_neural_lam_config(name):
     configs = training_configs(TRAINING_CONFIGS_DIR)
     training = yaml.safe_load(

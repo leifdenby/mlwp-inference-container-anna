@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Hindcasts of past cases, with the inputs ANNA was trained with:
+  `--initial-state-source danra` takes the initial states from DANRA itself
+  and `--boundary-source era5` the boundary from WeatherBench2 ERA5. The
+  outputs record their sources (`initial_state_source`, `boundary_source`).
+  `dev-utils/plot_storm_hindcast.py` plots a hindcast against DANRA.
+  [feat/danra-era5-hindcast](https://github.com/leifdenby/mlwp-inference-container-anna/tree/feat/danra-era5-hindcast),
+  @leifdenby
+
 ### Fixed
 
 - The forecast no longer downloads Natural Earth coastlines and borders
