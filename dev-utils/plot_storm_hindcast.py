@@ -3,7 +3,9 @@ Figures of an ANNA storm hindcast (`python -m anna_inference` with
 `--initial-state-source danra`), compared with DANRA, from its workdir:
 
 - `<prefix>_wind_mslp.png`: 10 m wind speed (0-40 m/s) with mean sea level
-  pressure contours at one valid time, DANRA next to ANNA
+  pressure contours at one valid time (00/06/12/18 UTC), 2x2: DANRA, ANNA,
+  ERA5 (WeatherBench2) and the DMI station observations of wind speed (DMI
+  open data metObs API, cached in `<prefix>_stations_<valid time>.csv`)
 - `<prefix>_timeseries.png`: the minimum mean sea level pressure and the
   maximum 10 m wind speed over Denmark (land points of Denmark, Natural
   Earth 10m) by valid time, DANRA and ANNA, with observed values marked.
@@ -37,9 +39,13 @@ import cartopy.io.shapereader as shpreader
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import requests
 import shapely
 import xarray as xr
 from PIL import Image
+
+from anna_inference.era5_boundary import WB2_ERA5
 
 # categorical slot 2 (as CLARA's member mean), text and surface
 SERIES_ANNA = "#eb6834"
@@ -60,6 +66,10 @@ WIND_YLIM = (0.0, 50.0)
 FIGSIZE = (16, 9)
 DPI = 150
 GIF_FRAME_MS = 700
+# DMI open data, station observations
+METOBS_URL = (
+    "https://opendataapi.dmi.dk/v2/metObs/collections/observation/items"
+)
 
 
 def calculate_wind_speed(ds: xr.Dataset) -> xr.DataArray:
@@ -140,6 +150,9 @@ def draw_wind_mslp(
     da_wind: xr.DataArray,
     da_mslp: xr.DataArray | None,
     title: str,
+    transform: ccrs.Projection = DANRA_CRS,
+    dims: tuple[str, str] = ("y", "x"),
+    title_size: int = 16,
 ):
     """
     Draw the wind speed, with mean sea level pressure contours.
@@ -149,52 +162,291 @@ def draw_wind_mslp(
     ax : plt.Axes
         Map axes in the DANRA projection.
     da_wind : xr.DataArray
-        10 m wind speed (m/s), dims (y, x).
+        10 m wind speed (m/s), dims `dims`.
     da_mslp : xr.DataArray or None
-        Mean sea level pressure (hPa), dims (y, x); no contours if None.
+        Mean sea level pressure (hPa), dims `dims`; no contours if None.
     title : str
         Panel title; the maximum wind (and minimum pressure) is added.
+    transform : ccrs.Projection
+        The projection of the fields' coordinates (DANRA's x/y, or
+        PlateCarree for ERA5's latitude/longitude).
+    dims : tuple[str, str]
+        The names of the fields' (y, x) dims, which are also coordinates.
+    title_size : int
+        Font size of the title.
 
     Returns
     -------
     matplotlib.collections.QuadMesh
         The wind speed mesh (for the colour bar).
     """
+    y_name, x_name = dims
     mesh = ax.pcolormesh(
-        da_wind.x.values,
-        da_wind.y.values,
-        da_wind.values,
-        transform=DANRA_CRS,
+        da_wind[x_name].values,
+        da_wind[y_name].values,
+        da_wind.transpose(*dims).values,
+        transform=transform,
         shading="auto",
         rasterized=True,
         **WIND_STYLE,
     )
     summary = f"max {float(np.nanmax(da_wind.values)):.0f} m/s"
     if da_mslp is not None:
+        da_mslp = da_mslp.transpose(*dims)
         cs = ax.contour(
-            da_mslp.x.values,
-            da_mslp.y.values,
+            da_mslp[x_name].values,
+            da_mslp[y_name].values,
             da_mslp.values,
             levels=MSLP_LEVELS,
             colors=INK,
             linewidths=0.8,
-            transform=DANRA_CRS,
+            transform=transform,
         )
         ax.clabel(cs, fmt="%d", fontsize=10)
         # the pressure minimum within the map
         i_min = np.unravel_index(np.nanargmin(da_mslp.values), da_mslp.shape)
         ax.plot(
-            da_mslp.x.values[i_min[1]],
-            da_mslp.y.values[i_min[0]],
+            da_mslp[x_name].values[i_min[1]],
+            da_mslp[y_name].values[i_min[0]],
             marker="x",
             color=INK,
             markersize=10,
             markeredgewidth=2,
-            transform=DANRA_CRS,
+            transform=transform,
         )
         summary = f"min {float(np.nanmin(da_mslp.values)):.0f} hPa, {summary}"
-    ax.set_title(f"{title}  ({summary})", color=INK, fontsize=16, loc="left")
+    ax.set_title(
+        f"{title}  ({summary})", color=INK, fontsize=title_size, loc="left"
+    )
     return mesh
+
+
+def load_era5(
+    valid_time: np.datetime64, source: str = WB2_ERA5
+) -> tuple[xr.DataArray, xr.DataArray]:
+    """
+    Load ERA5's 10 m wind speed and MSLP around the map at one valid time.
+
+    Parameters
+    ----------
+    valid_time : np.datetime64
+        The valid time (00/06/12/18 UTC, the times of the WeatherBench2
+        store).
+    source : str
+        The ERA5 zarr store (WeatherBench2 layout), read anonymously from
+        gs://.
+
+    Returns
+    -------
+    tuple[xr.DataArray, xr.DataArray]
+        The wind speed (m/s) and MSLP (hPa), dims (latitude, longitude).
+    """
+    storage_options = {"token": "anon"} if source.startswith("gs://") else None
+    ds = xr.open_zarr(source, storage_options=storage_options)
+    lon_min, lon_max, lat_min, lat_max = MAP_EXTENT
+    ds = ds[
+        [
+            "10m_u_component_of_wind",
+            "10m_v_component_of_wind",
+            "mean_sea_level_pressure",
+        ]
+    ].sel(time=valid_time)
+    ds = ds.sel(
+        latitude=slice(lat_max + 2, lat_min - 2),
+        longitude=slice(lon_min - 3, lon_max + 3),
+    ).load()
+    da_wind = np.hypot(
+        ds["10m_u_component_of_wind"], ds["10m_v_component_of_wind"]
+    )
+    return da_wind, ds["mean_sea_level_pressure"] / 100
+
+
+def fetch_station_wind(
+    valid_time: np.datetime64, fp_cache: Path | None = None
+) -> pd.DataFrame:
+    """
+    Fetch the DMI station observations of 10 m wind speed at one time.
+
+    From DMI's open data metObs API (which dmiparquet.denby.eu republishes,
+    from 2020 only). `wind_speed` is the 10-minute mean wind speed. Stations
+    without a location in the API for that time are left out.
+
+    Parameters
+    ----------
+    valid_time : np.datetime64
+        The observation time.
+    fp_cache : Path, optional
+        A CSV file to read the observations from if it exists, or to save
+        them to.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns `station_id`, `lon`, `lat` and `wind_speed` (m/s).
+    """
+    if fp_cache is not None and fp_cache.exists():
+        return pd.read_csv(fp_cache, dtype={"station_id": str})
+    t = f"{str(valid_time)[:19]}Z"
+    response = requests.get(
+        METOBS_URL,
+        params=dict(
+            parameterId="wind_speed", datetime=f"{t}/{t}", limit=10000
+        ),
+        timeout=60,
+    )
+    response.raise_for_status()
+    features = response.json()["features"]
+    rows = [
+        dict(
+            station_id=f["properties"]["stationId"],
+            lon=f["geometry"]["coordinates"][0],
+            lat=f["geometry"]["coordinates"][1],
+            wind_speed=f["properties"]["value"],
+        )
+        for f in features
+        if f["geometry"] is not None
+    ]
+    df = pd.DataFrame(rows)
+    print(
+        f"{len(df)} station observations at {t} ({len(features) - len(df)} "
+        "without a location left out)"
+    )
+    if fp_cache is not None:
+        df.to_csv(fp_cache, index=False)
+    return df
+
+
+def draw_stations(ax: plt.Axes, df_obs: pd.DataFrame, title: str) -> None:
+    """
+    Draw station observations of wind speed as coloured dots.
+
+    Parameters
+    ----------
+    ax : plt.Axes
+        Map axes in the DANRA projection.
+    df_obs : pd.DataFrame
+        Columns `lon`, `lat` and `wind_speed` (m/s).
+    title : str
+        Panel title; the number of stations and the maximum are added.
+    """
+    df_obs = df_obs.sort_values("wind_speed")
+    ax.scatter(
+        df_obs.lon,
+        df_obs.lat,
+        c=df_obs.wind_speed,
+        s=70,
+        edgecolors=INK,
+        linewidths=0.6,
+        transform=ccrs.PlateCarree(),
+        zorder=3,
+        **WIND_STYLE,
+    )
+    ax.set_title(
+        f"{title}  ({len(df_obs)}, 10-min mean, max "
+        f"{df_obs.wind_speed.max():.0f} m/s)",
+        color=INK,
+        fontsize=14,
+        loc="left",
+    )
+
+
+def plot_four_panels(
+    ds_anna: xr.Dataset,
+    ds_danra: xr.Dataset,
+    valid_time: np.datetime64,
+    fp: Path,
+    case_name: str,
+    fp_obs_cache: Path | None = None,
+) -> None:
+    """
+    Plot DANRA, ANNA, ERA5 and station observations at one valid time (2x2,
+    16:9).
+
+    Parameters
+    ----------
+    ds_anna : xr.Dataset
+        ANNA single levels (`outputs/single_levels.zarr`).
+    ds_danra : xr.Dataset
+        DANRA single levels on the same grid.
+    valid_time : np.datetime64
+        The valid time (00/06/12/18 UTC, for ERA5).
+    fp : Path
+        The PNG to write.
+    case_name : str
+        The case, for the title.
+    fp_obs_cache : Path, optional
+        CSV cache of the station observations (see `fetch_station_wind`).
+    """
+    ds_anna_t = crop_to_map(ds_anna.sel(time=valid_time)).load()
+    ds_danra_t = crop_to_map(ds_danra.sel(time=valid_time)).load()
+    da_wind_era5, da_mslp_era5 = load_era5(valid_time)
+    df_obs = fetch_station_wind(valid_time, fp_obs_cache)
+    init_time = get_init_time(ds_anna)
+    lead_h = int((valid_time - init_time) / np.timedelta64(1, "h"))
+
+    fig = plt.figure(figsize=FIGSIZE, facecolor=SURFACE)
+    width, height = 0.46, 0.37
+    rects = [
+        [0.03, 0.50, width, height],
+        [0.51, 0.50, width, height],
+        [0.03, 0.08, width, height],
+        [0.51, 0.08, width, height],
+    ]
+    axes = [add_map_axes(fig, rect) for rect in rects]
+    # the maps keep their aspect ratio, so close the columns up in the middle
+    for ax, anchor in zip(axes, ["E", "W", "E", "W"]):
+        ax.set_anchor(anchor)
+        ax.apply_aspect()
+    for ax, (title, ds) in zip(
+        axes, [("DANRA", ds_danra_t), (f"ANNA +{lead_h} h", ds_anna_t)]
+    ):
+        mesh = draw_wind_mslp(
+            ax,
+            calculate_wind_speed(ds),
+            ds.pres_seasurface / 100,
+            title,
+            title_size=14,
+        )
+    draw_wind_mslp(
+        axes[2],
+        da_wind_era5,
+        da_mslp_era5,
+        "ERA5",
+        transform=ccrs.PlateCarree(),
+        dims=("latitude", "longitude"),
+        title_size=14,
+    )
+    draw_stations(axes[3], df_obs, "DMI stations")
+    pos_top, pos_bottom = axes[1].get_position(), axes[3].get_position()
+    cax = fig.add_axes(
+        [
+            pos_top.x1 + 0.04,
+            pos_bottom.y0,
+            0.012,
+            pos_top.y1 - pos_bottom.y0,
+        ]
+    )
+    cb = fig.colorbar(mesh, cax=cax, orientation="vertical")
+    cb.set_label(
+        "10 m wind speed (m/s); contours: MSLP every 4 hPa",
+        color=INK_2,
+        fontsize=12,
+    )
+    cb.ax.tick_params(colors=INK_2, labelsize=11)
+    cb.outline.set_edgecolor(GRID)
+    fig.text(
+        0.03,
+        0.975,
+        f"{case_name}: valid {str(valid_time)[:13]}Z, ANNA from "
+        f"{str(init_time)[:13]}Z ({describe_inputs(ds_anna)})",
+        color=INK,
+        fontsize=17,
+        ha="left",
+        va="top",
+    )
+    fig.savefig(fp, dpi=DPI, facecolor=SURFACE)
+    plt.close(fig)
+    print(f"wrote {fp}")
 
 
 def crop_to_map(ds: xr.Dataset) -> xr.Dataset:
@@ -463,7 +715,11 @@ def plot_timeseries(
         )
         ax.set_ylim(*ylim)
         ax.set_title(title, color=INK, fontsize=16, loc="left")
+        # 6-hourly labels (3-hourly ones overlap)
+        ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 6)))
+        ax.xaxis.set_minor_locator(mdates.HourLocator(byhour=range(3, 24, 6)))
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b\n%H UTC"))
+        ax.grid(which="minor", color=GRID, linewidth=0.4)
         ax.tick_params(colors=INK_2, labelsize=13)
         ax.grid(color=GRID, linewidth=0.6)
         for spine in ax.spines.values():
@@ -472,8 +728,8 @@ def plot_timeseries(
     fig.text(
         0.06,
         0.95,
-        f"{case_name}: ANNA from {str(init_time)[:13]}Z "
-        f"({describe_inputs(ds_anna)}) and DANRA, land points of Denmark",
+        f"{case_name}: ANNA from {str(init_time)[:13]}Z and DANRA\n"
+        f"{describe_inputs(ds_anna)}; land points of Denmark",
         color=INK,
         fontsize=17,
         ha="left",
@@ -592,12 +848,14 @@ def main() -> None:
     )
     out_dir = args.out_dir or workdir / "figures"
     out_dir.mkdir(parents=True, exist_ok=True)
-    plot_side_by_side(
+    t_name = str(valid_time)[:13]
+    plot_four_panels(
         ds_anna,
         ds_danra,
         valid_time,
         out_dir / f"{prefix}_wind_mslp.png",
         args.case_name,
+        fp_obs_cache=out_dir / f"{prefix}_stations_{t_name}.csv",
     )
     plot_timeseries(
         ds_anna,
