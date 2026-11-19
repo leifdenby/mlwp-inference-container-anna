@@ -3,16 +3,17 @@ Figures of an ANNA storm hindcast (`python -m anna_inference` with
 `--initial-state-source danra`), compared with DANRA, from its workdir:
 
 - `<prefix>_wind_mslp.png`: 10 m wind speed (0-40 m/s) with mean sea level
-  pressure contours at one valid time (00/06/12/18 UTC), 2x2: DANRA, ANNA,
-  ERA5 (WeatherBench2) and the DMI station observations of wind speed (DMI
+  pressure contours at one valid time, 2x2: ERA5 (hourly ARCO-ERA5) and
+  DANRA on top, ANNA and the DMI station observations of wind speed (DMI
   open data metObs API, cached in `<prefix>_stations_<valid time>.csv`)
+  below
 - `<prefix>_timeseries.png`: the minimum mean sea level pressure and the
   maximum 10 m wind speed over Denmark (land points of Denmark, Natural
   Earth 10m) by valid time, DANRA and ANNA, with observed values marked.
   The y-axes are fixed (`--mslp-ylim`, `--wind-ylim`), so that figures of
   other models (e.g. the CLARA hindcast of the same case) can be overlaid
-- with `--frames`: `frames/<prefix>_wind_<valid time>.png`, the wind speed
-  maps of every valid time, and `<prefix>_wind.gif` animating them
+- with `--frames`: `frames/<prefix>_wind_<valid time>.png`, the 2x2 maps of
+  every valid time, and `<prefix>_wind.gif` animating them
 
 DANRA is taken from the workdir (`inputs/interior_single_levels.zarr`, which
 covers the initial states and all valid times). Winds are relative to the
@@ -45,8 +46,6 @@ import shapely
 import xarray as xr
 from PIL import Image
 
-from anna_inference.era5_boundary import WB2_ERA5
-
 # categorical slot 2 (as CLARA's member mean), text and surface
 SERIES_ANNA = "#eb6834"
 INK, INK_2, SURFACE, GRID = "#0b0b0b", "#52514e", "#fcfcfb", "#d6d5d0"
@@ -66,6 +65,12 @@ WIND_YLIM = (0.0, 50.0)
 FIGSIZE = (16, 9)
 DPI = 150
 GIF_FRAME_MS = 700
+# hourly ERA5 (the 6-hourly WeatherBench2 store of the boundary is derived
+# from it); zarr v2, as the environment has zarr < 3
+ARCO_ERA5 = (
+    "gs://gcp-public-data-arco-era5/ar/"
+    "1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2"
+)
 # DMI open data, station observations
 METOBS_URL = (
     "https://opendataapi.dmi.dk/v2/metObs/collections/observation/items"
@@ -222,7 +227,7 @@ def draw_wind_mslp(
 
 
 def load_era5(
-    valid_time: np.datetime64, source: str = WB2_ERA5
+    valid_time: np.datetime64, source: str = ARCO_ERA5
 ) -> tuple[xr.DataArray, xr.DataArray]:
     """
     Load ERA5's 10 m wind speed and MSLP around the map at one valid time.
@@ -230,11 +235,10 @@ def load_era5(
     Parameters
     ----------
     valid_time : np.datetime64
-        The valid time (00/06/12/18 UTC, the times of the WeatherBench2
-        store).
+        The valid time (any hour with the hourly ARCO-ERA5 store).
     source : str
-        The ERA5 zarr store (WeatherBench2 layout), read anonymously from
-        gs://.
+        The ERA5 zarr store (WeatherBench2/ARCO-ERA5 layout), read
+        anonymously from gs://.
 
     Returns
     -------
@@ -242,7 +246,8 @@ def load_era5(
         The wind speed (m/s) and MSLP (hPa), dims (latitude, longitude).
     """
     storage_options = {"token": "anon"} if source.startswith("gs://") else None
-    ds = xr.open_zarr(source, storage_options=storage_options)
+    # no dask: the hourly store has ~550,000 time chunks per variable
+    ds = xr.open_zarr(source, storage_options=storage_options, chunks=None)
     lon_min, lon_max, lat_min, lat_max = MAP_EXTENT
     ds = ds[
         [
@@ -359,8 +364,8 @@ def plot_four_panels(
     fp_obs_cache: Path | None = None,
 ) -> None:
     """
-    Plot DANRA, ANNA, ERA5 and station observations at one valid time (2x2,
-    16:9).
+    Plot ERA5 and DANRA (top), ANNA and the station observations (bottom) at
+    one valid time (2x2, 16:9).
 
     Parameters
     ----------
@@ -369,7 +374,7 @@ def plot_four_panels(
     ds_danra : xr.Dataset
         DANRA single levels on the same grid.
     valid_time : np.datetime64
-        The valid time (00/06/12/18 UTC, for ERA5).
+        The valid time.
     fp : Path
         The PNG to write.
     case_name : str
@@ -397,8 +402,19 @@ def plot_four_panels(
     for ax, anchor in zip(axes, ["E", "W", "E", "W"]):
         ax.set_anchor(anchor)
         ax.apply_aspect()
+    ax_era5, ax_danra, ax_anna, ax_obs = axes
+    draw_wind_mslp(
+        ax_era5,
+        da_wind_era5,
+        da_mslp_era5,
+        "ERA5",
+        transform=ccrs.PlateCarree(),
+        dims=("latitude", "longitude"),
+        title_size=14,
+    )
     for ax, (title, ds) in zip(
-        axes, [("DANRA", ds_danra_t), (f"ANNA +{lead_h} h", ds_anna_t)]
+        [ax_danra, ax_anna],
+        [("DANRA", ds_danra_t), (f"ANNA +{lead_h} h", ds_anna_t)],
     ):
         mesh = draw_wind_mslp(
             ax,
@@ -407,16 +423,7 @@ def plot_four_panels(
             title,
             title_size=14,
         )
-    draw_wind_mslp(
-        axes[2],
-        da_wind_era5,
-        da_mslp_era5,
-        "ERA5",
-        transform=ccrs.PlateCarree(),
-        dims=("latitude", "longitude"),
-        title_size=14,
-    )
-    draw_stations(axes[3], df_obs, "DMI stations")
+    draw_stations(ax_obs, df_obs, "DMI stations")
     pos_top, pos_bottom = axes[1].get_position(), axes[3].get_position()
     cax = fig.add_axes(
         [
@@ -513,78 +520,6 @@ def get_init_time(ds_anna: xr.Dataset) -> np.datetime64:
     return np.datetime64(
         ds_anna.attrs["analysis_time"], "ns"
     ) + np.timedelta64(3, "h")
-
-
-def plot_side_by_side(
-    ds_anna: xr.Dataset,
-    ds_danra: xr.Dataset,
-    valid_time: np.datetime64,
-    fp: Path,
-    case_name: str,
-    with_mslp: bool = True,
-) -> None:
-    """
-    Plot DANRA next to ANNA at one valid time (16:9).
-
-    Parameters
-    ----------
-    ds_anna : xr.Dataset
-        ANNA single levels (`outputs/single_levels.zarr`).
-    ds_danra : xr.Dataset
-        DANRA single levels on the same grid.
-    valid_time : np.datetime64
-        The valid time.
-    fp : Path
-        The PNG to write.
-    case_name : str
-        The case, for the title.
-    with_mslp : bool
-        Whether to draw the MSLP contours.
-    """
-    ds_anna_t = crop_to_map(ds_anna.sel(time=valid_time)).load()
-    ds_danra_t = crop_to_map(ds_danra.sel(time=valid_time)).load()
-    init_time = get_init_time(ds_anna)
-    lead_h = int((valid_time - init_time) / np.timedelta64(1, "h"))
-
-    panels = [
-        ("DANRA", ds_danra_t),
-        (f"ANNA +{lead_h} h", ds_anna_t),
-    ]
-    fig = plt.figure(figsize=FIGSIZE, facecolor=SURFACE)
-    for k, (title, ds) in enumerate(panels):
-        ax = add_map_axes(fig, [0.02 + k * 0.49, 0.15, 0.47, 0.72])
-        mesh = draw_wind_mslp(
-            ax,
-            calculate_wind_speed(ds),
-            ds.pres_seasurface / 100 if with_mslp else None,
-            title,
-        )
-    cb = fig.colorbar(
-        mesh,
-        cax=fig.add_axes([0.30, 0.075, 0.40, 0.022]),
-        orientation="horizontal",
-    )
-    cb.set_label(
-        "10 m wind speed (m/s)"
-        + ("; contours: MSLP every 4 hPa" if with_mslp else ""),
-        color=INK_2,
-        fontsize=13,
-    )
-    cb.ax.tick_params(colors=INK_2, labelsize=12)
-    cb.outline.set_edgecolor(GRID)
-    fig.text(
-        0.02,
-        0.97,
-        f"{case_name}: valid {str(valid_time)[:13]}Z, ANNA from "
-        f"{str(init_time)[:13]}Z ({describe_inputs(ds_anna)})",
-        color=INK,
-        fontsize=18,
-        ha="left",
-        va="top",
-    )
-    fig.savefig(fp, dpi=DPI, facecolor=SURFACE)
-    plt.close(fig)
-    print(f"wrote {fp}")
 
 
 def calculate_denmark_extremes(
@@ -748,7 +683,8 @@ def plot_frames(
     case_name: str,
 ) -> None:
     """
-    Plot the wind speed maps of every valid time, and animate them as a GIF.
+    Plot the 2x2 maps (see `plot_four_panels`) of every valid time, and
+    animate them as a GIF.
 
     Parameters
     ----------
@@ -767,11 +703,15 @@ def plot_frames(
     frames_dir.mkdir(parents=True, exist_ok=True)
     fps = []
     for valid_time in ds_anna.time.values:
-        fp = frames_dir / (
-            f"{prefix}_wind_{str(valid_time)[:13].replace(':', '')}.png"
-        )
-        plot_side_by_side(
-            ds_anna, ds_danra, valid_time, fp, case_name, with_mslp=False
+        t_name = str(valid_time)[:13]
+        fp = frames_dir / f"{prefix}_wind_{t_name}.png"
+        plot_four_panels(
+            ds_anna,
+            ds_danra,
+            valid_time,
+            fp,
+            case_name,
+            fp_obs_cache=frames_dir / f"{prefix}_stations_{t_name}.csv",
         )
         fps.append(fp)
     images = [
@@ -834,7 +774,7 @@ def main() -> None:
     parser.add_argument(
         "--frames",
         action="store_true",
-        help="also plot the wind maps of every valid time, and a GIF",
+        help="also plot the 2x2 maps of every valid time, and a GIF",
     )
     args = parser.parse_args()
 
